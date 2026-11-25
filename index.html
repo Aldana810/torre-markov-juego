@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Torre Markov + Arbol + Grafo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background-color: #0f172a;
+      color: #f8fafc;
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
+
+    #game-shell {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100dvh;
+      max-width: 100vw;
+      overflow: hidden;
+    }
+
+    #canvas-wrapper {
+      position: relative;
+      flex: 1 1 auto;
+      width: 100%;
+      min-height: 0;
+      overflow: hidden;
+      touch-action: manipulation;
+    }
+
+    #game-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-shell">
+    <!-- Encabezado superior con estado del juego, árbol y cadena de Markov -->
+    <header class="bg-slate-900/95 border-b border-slate-800 px-3 py-2 sm:px-5 sm:py-2.5 shrink-0 z-10">
+      <div class="max-w-5xl mx-auto flex flex-col gap-1">
+        <div id="lbl-top-1" class="text-xs sm:text-sm font-semibold text-slate-100 tracking-tight truncate">
+          Pisos: 0/8 (Dia) | Pts: 0 | Arbol: Residencial
+        </div>
+        <div id="lbl-top-2" class="text-[11px] sm:text-xs font-medium text-cyan-300 truncate">
+          Markov: Calma | Meta: 8 pisos | Espera que pasen los pajaros y suelta
+        </div>
+      </div>
+    </header>
+
+    <!-- Área principal de juego con canvas responsive -->
+    <main id="canvas-wrapper">
+      <canvas id="game-canvas"></canvas>
+
+      <!-- Hint táctil / de teclado discreto en la esquina inferior izquierda del canvas -->
+      <div
+        id="hint-pill"
+        class="pointer-events-none absolute bottom-2.5 left-2.5 sm:bottom-3 sm:left-3 bg-slate-950/75 text-slate-100 text-[11px] sm:text-xs font-medium px-3 py-1.5 rounded-full border border-white/15 backdrop-blur-sm shadow-lg"
+      >
+        Toca o haz clic (o ESPACIO) para soltar
+      </div>
+    </main>
+
+    <!-- Panel inferior: selector de nodos del árbol de pisos y botón Reiniciar -->
+    <footer class="bg-slate-900 border-t border-slate-800 px-2.5 py-2 sm:px-4 sm:py-2.5 shrink-0 z-10">
+      <div class="max-w-5xl mx-auto flex items-center justify-between gap-2">
+        <div
+          id="tree-buttons"
+          class="flex items-center gap-1.5 sm:gap-2 overflow-x-auto py-0.5 flex-1"
+          aria-label="Tipos de piso del árbol"
+        ></div>
+
+        <button
+          id="btn-reset"
+          type="button"
+          class="shrink-0 bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 font-bold text-xs sm:text-sm px-3.5 py-2 sm:px-4 sm:py-2 rounded-xl border border-amber-300/60 shadow transition cursor-pointer"
+        >
+          Reiniciar
+        </button>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    /**
+     * =========================================================================
+     * TORRE MARKOV + ARBOL + GRAFO (Versión Web HTML5 Canvas / GitHub Pages)
+     * =========================================================================
+     * Mantiene las estructuras y mecánicas del juego en Java:
+     * 1) Cadena de Markov para el clima (CALMA, BRISA, RAFAGA) y velocidad de grúa.
+     * 2) Árbol de tipos de piso (Cimiento -> Residencial/Penthouse, Cristal/Mirador).
+     * 3) Grafo de soporte de bloques (soporte inferior, solape >= 22px, snap < 8px).
+     * 4) Meta de 8 pisos con anochecer progresivo, estrellas y ventanas iluminadas.
+     * 5) Grúa animada, personas caminando, pajaritos cruzando entre pisos (derrota si
+     *    se aplastan al soltar) y celebración saltando en los pisos al ganar.
+     * =========================================================================
+     */
+
+    (function () {
+      "use strict";
+
+      // -----------------------------------------------------------------------
+      // 1. CADENA DE MARKOV DEL CLIMA
+      // -----------------------------------------------------------------------
+      const Clima = Object.freeze({
+        CALMA: { id: "CALMA", desc: "Calma", vel: 3.2, idx: 0 },
+        BRISA: { id: "BRISA", desc: "Brisa", vel: 5.2, idx: 1 },
+        RAFAGA: { id: "RAFAGA", desc: "Rafaga", vel: 7.8, idx: 2 }
+      });
+
+      class MarkovClima {
+        constructor() {
+          this.estados = [Clima.CALMA, Clima.BRISA, Clima.RAFAGA];
+          // Matriz de transición idéntica a la versión Java:
+          // Fila 0 (CALMA):  0.55 CALMA, 0.35 BRISA, 0.10 RAFAGA
+          // Fila 1 (BRISA):  0.30 CALMA, 0.45 BRISA, 0.25 RAFAGA
+          // Fila 2 (RAFAGA): 0.20 CALMA, 0.50 BRISA, 0.30 RAFAGA
+          this.matriz = [
+            [0.55, 0.35, 0.10],
+            [0.30, 0.45, 0.25],
+            [0.20, 0.50, 0.30]
+          ];
+          this.actual = Clima.CALMA;
+        }
+
+        reset() {
+          this.actual = Clima.CALMA;
+        }
+
+        siguiente() {
+          const fila = this.actual.idx;
+          const r = Math.random();
+          let acum = 0.0;
+          for (let col = 0; col < this.estados.length; col++) {
+            acum += this.matriz[fila][col];
+            if (r <= acum) {
+              this.actual = this.estados[col];
+              return this.actual;
+            }
+          }
+          this.actual = this.estados[this.estados.length - 1];
+          return this.actual;
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // 2. ÁRBOL DE TIPOS DE PISO (NodoPiso)
+      // -----------------------------------------------------------------------
+      class NodoPiso {
+        constructor(nombre, puntosBase, colorPared, colorVentana) {
+          this.nombre = nombre;
+          this.puntosBase = puntosBase;
+          this.colorPared = colorPared;
+          this.colorVentana = colorVentana;
+          this.hijos = [];
+        }
+
+        agregarHijo(hijo) {
+          this.hijos.push(hijo);
+          return hijo;
+        }
+      }
+
+      function construirArbolPisos() {
+        const raiz = new NodoPiso("Cimiento", 10, "#7f8c8d", "#ffffff");
+        const residencial = new NodoPiso("Residencial", 20, "#3498db", "#fff3b0");
+        residencial.agregarHijo(new NodoPiso("Penthouse", 40, "#9b59b6", "#ffeaa7"));
+
+        const cristal = new NodoPiso("Cristal", 25, "#1abc9c", "#d6f5f5");
+        cristal.agregarHijo(new NodoPiso("Mirador", 50, "#e67e22", "#ffffff"));
+
+        raiz.agregarHijo(residencial);
+        raiz.agregarHijo(cristal);
+        return raiz;
+      }
+
+      function obtenerOpcionesSeleccionables(raiz) {
+        const opciones = [];
+        for (const rama of raiz.hijos) {
+          opciones.push(rama);
+          for (const hoja of rama.hijos) {
+            opciones.push(hoja);
+          }
+        }
+        return opciones;
+      }
+
+      // -----------------------------------------------------------------------
+      // 3. GRAFO DE SOPORTE (Bloque) Y ENTIDADES AMBIENTALES
+      // -----------------------------------------------------------------------
+      class Bloque {
+        constructor(nivel, x, ancho, alto, tipo, soporte) {
+          this.nivel = nivel;
+          this.x = x;
+          this.ancho = ancho;
+          this.alto = alto;
+          this.tipo = tipo;
+          this.soporte = soporte || null;
+          // Conectividad en el grafo hasta el cimiento base (nivel 0)
+          this.conectadoCimientos = (nivel === 0) || (this.soporte !== null && this.soporte.conectadoCimientos);
+        }
+      }
+
+      class Persona {
+        constructor(xRatio, vel, dir, colorCamisa) {
+          this.xRatio = xRatio;
+          this.x = 80;
+          this.vel = vel;
+          this.paso = 0;
+          this.dir = dir;
+          this.colorCamisa = colorCamisa;
+          this.pisoAsignado = 0;
+          this.offsetRelativo = 0;
+          this.inicializadoX = false;
+        }
+      }
+
+      class Pajaro {
+        constructor(x, yRelativaHueco, vx, faseAla) {
+          this.x = x;
+          this.yRelativaHueco = yRelativaHueco;
+          this.vx = vx;
+          this.faseAla = faseAla;
+        }
+      }
+
+      class LineaViento {
+        constructor(xRatio, yRatio, largo, vel) {
+          this.xRatio = xRatio;
+          this.yRatio = yRatio;
+          this.x = 0;
+          this.y = 80;
+          this.largo = largo;
+          this.vel = vel;
+          this.inicializada = false;
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // 4. ESTADO DEL JUEGO Y REFERENCIAS DEL DOM
+      // -----------------------------------------------------------------------
+      const PISOS_META = 8;
+      const ALTO_PISO = 36;
+      const ANCHO_INICIAL_BASE = 180;
+      const LOGICAL_REF_WIDTH = 820; // Referencia lógica para mantener proporciones del juego
+
+      const canvas = document.getElementById("game-canvas");
+      const ctx = canvas.getContext("2d");
+      const wrapper = document.getElementById("canvas-wrapper");
+      const lblTop1 = document.getElementById("lbl-top-1");
+      const lblTop2 = document.getElementById("lbl-top-2");
+      const treeButtonsEl = document.getElementById("tree-buttons");
+      const btnReset = document.getElementById("btn-reset");
+
+      const markov = new MarkovClima();
+      const raizArbol = construirArbolPisos();
+      const opcionesArbol = obtenerOpcionesSeleccionables(raizArbol);
+
+      let viewW = 820;
+      let viewH = 500;
+      let scaleFactor = 1.0;
+
+      let torre = [];
+      let personas = [];
+      let pajaros = [];
+      let viento = [];
+      let estrellas = [];
+
+      let tipoActual = raizArbol.hijos[0];
+      let gruaX = 180;
+      let anchoBloqueActual = ANCHO_INICIAL_BASE;
+      let dirGrua = 1;
+      let puntaje = 0;
+      let ticksAvisoClima = 0;
+      let avisoClima = "";
+      let gameOver = false;
+      let victoria = false;
+      let mensaje = "Meta: 8 pisos | Espera que pasen los pajaros y suelta";
+
+      function inicializarEntidadesEscenario() {
+        const coloresCamisa = ["#e74c3c", "#f1c40f", "#2ecc71", "#9b59b6", "#e67e22"];
+        personas = [];
+        for (let i = 0; i < 6; i++) {
+          personas.push(
+            new Persona(
+              0.1 + i * 0.14,
+              0.7 + Math.random() * 0.6,
+              i % 2 === 0 ? 1 : -1,
+              coloresCamisa[i % coloresCamisa.length]
+            )
+          );
+        }
+
+        pajaros = [];
+        for (let i = 0; i < 3; i++) {
+          pajaros.push(
+            new Pajaro(
+              -40 - i * 240,
+              0.25 + i * 0.25,
+              1.8 + Math.random() * 1.1,
+              i * 1.4
+            )
+          );
+        }
+
+        viento = [];
+        for (let i = 0; i < 14; i++) {
+          viento.push(
+            new LineaViento(
+              Math.random(),
+              0.12 + Math.random() * 0.5,
+              25 + Math.random() * 45,
+              4 + Math.random() * 5
+            )
+          );
+        }
+
+        estrellas = [];
+        for (let i = 0; i < 35; i++) {
+          estrellas.push({
+            xRatio: Math.random(),
+            yRatio: 0.04 + Math.random() * 0.46
+          });
+        }
+      }
+
+      function obtenerSueloYBase() {
+        // Ajusta la altura del suelo según el alto disponible del canvas
+        return Math.max(250, Math.min(470, viewH - 65));
+      }
+
+      function obtenerDesplazamientoY() {
+        const n = torre.length;
+        return Math.max(0, (n - 7) * ALTO_PISO);
+      }
+
+      function obtenerYBloqueColgando(desp) {
+        const n = torre.length;
+        const sueloY = obtenerSueloYBase();
+        return Math.max(80, Math.floor(sueloY - (n + 2) * ALTO_PISO + desp));
+      }
+
+      function obtenerYCimaTorre(desp) {
+        const n = torre.length;
+        const sueloY = obtenerSueloYBase();
+        return Math.floor(sueloY - n * ALTO_PISO + desp);
+      }
+
+      function obtenerYPajaro(pj, desp) {
+        const yColgando = obtenerYBloqueColgando(desp);
+        const yCima = obtenerYCimaTorre(desp);
+        const yInferior = Math.min(yCima - 10, yColgando + ALTO_PISO + 14);
+        const ySuperior = Math.min(yInferior - 10, yColgando + ALTO_PISO + 4);
+        return Math.floor(ySuperior + pj.yRelativaHueco * Math.max(12, yInferior - ySuperior));
+      }
+
+      function obtenerLimitesGruaX() {
+        const minX = Math.min(80, Math.max(24, viewW * 0.12));
+        const maxX = Math.max(minX + anchoBloqueActual + 20, viewW - Math.min(150, Math.max(95, viewW * 0.18)));
+        return { minX, maxX };
+      }
+
+      function aplastoPajaroAlSoltar() {
+        const desp = obtenerDesplazamientoY();
+        const xMin = gruaX - 4;
+        const xMax = gruaX + anchoBloqueActual + 4;
+        const yTop = obtenerYBloqueColgando(desp) - 6;
+        const yBot = obtenerYCimaTorre(desp) + 6;
+
+        for (const pj of pajaros) {
+          const py = obtenerYPajaro(pj, desp);
+          if (pj.x >= xMin && pj.x <= xMax && py >= yTop && py <= yBot) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function prepararCelebracionEnTorre() {
+        const maxIndicePiso = Math.max(1, torre.length - 1);
+        for (let i = 0; i < personas.length; i++) {
+          const p = personas[i];
+          const idx = 1 + (i % maxIndicePiso);
+          const b = torre[idx];
+          p.pisoAsignado = idx;
+          const margen = Math.min(12.0, b.ancho / 4.0);
+          const util = Math.max(8.0, b.ancho - margen * 2);
+          p.offsetRelativo = margen + util * ((i + 0.5) / personas.length);
+        }
+      }
+
+      function activarAvisoClima(clima) {
+        if (clima === Clima.RAFAGA) {
+          avisoClima = "AVISO: ¡Rafagas de viento!";
+        } else if (clima === Clima.BRISA) {
+          avisoClima = "AVISO: Brisa en el cielo";
+        } else {
+          avisoClima = "AVISO: Tiempo calmo";
+        }
+        ticksAvisoClima = 110;
+      }
+
+      function reiniciarJuego() {
+        torre = [];
+        anchoBloqueActual = ANCHO_INICIAL_BASE;
+        puntaje = 0;
+        gameOver = false;
+        victoria = false;
+        ticksAvisoClima = 0;
+        avisoClima = "";
+        markov.reset();
+        mensaje = "Meta: " + PISOS_META + " pisos | Espera que pasen los pajaros";
+
+        for (let i = 0; i < pajaros.length; i++) {
+          pajaros[i].x = -40 - i * 240;
+          pajaros[i].yRelativaHueco = 0.25 + i * 0.25;
+        }
+
+        for (const p of personas) {
+          p.inicializadoX = false;
+        }
+
+        const centroBaseX = (viewW - anchoBloqueActual) / 2.0;
+        const cimiento = new Bloque(0, centroBaseX, anchoBloqueActual, ALTO_PISO, raizArbol, null);
+        torre.push(cimiento);
+
+        gruaX = Math.max(30, centroBaseX - 60);
+        dirGrua = 1;
+        tipoActual = raizArbol.hijos[0];
+
+        actualizarUI();
+      }
+
+      function soltarBloque() {
+        if (gameOver || victoria || torre.length === 0) return;
+
+        if (aplastoPajaroAlSoltar()) {
+          gameOver = true;
+          mensaje = "¡PERDISTE! Aplastaste un pajarito al soltar el piso.";
+          actualizarUI();
+          return;
+        }
+
+        const anterior = torre[torre.length - 1];
+        let ini = Math.max(gruaX, anterior.x);
+        let fin = Math.min(gruaX + anchoBloqueActual, anterior.x + anterior.ancho);
+        let solape = fin - ini;
+
+        if (solape < 22) {
+          gameOver = true;
+          mensaje = "COLAPSO en piso " + (torre.length - 1);
+          actualizarUI();
+          return;
+        }
+
+        if (Math.abs(gruaX - anterior.x) < 8) {
+          ini = anterior.x;
+          solape = anterior.ancho;
+          puntaje += 10;
+          mensaje = "Perfecto! +10";
+        } else {
+          mensaje = "Apoyo: " + Math.floor(solape) + " px";
+        }
+
+        anchoBloqueActual = solape;
+        const nuevoBloque = new Bloque(
+          torre.length,
+          ini,
+          anchoBloqueActual,
+          ALTO_PISO,
+          tipoActual,
+          anterior
+        );
+        torre.push(nuevoBloque);
+        puntaje += tipoActual.puntosBase;
+
+        const pisosActuales = torre.length - 1;
+        if (pisosActuales >= PISOS_META) {
+          victoria = true;
+          puntaje += 100;
+          prepararCelebracionEnTorre();
+          mensaje = "¡HOGAR LISTO! Todos celebran en los " + PISOS_META + " pisos (+100 bonus)";
+          actualizarUI();
+          return;
+        }
+
+        const climaAnterior = markov.actual;
+        const climaSiguiente = markov.siguiente();
+        if (climaSiguiente !== climaAnterior) {
+          activarAvisoClima(climaSiguiente);
+        }
+
+        actualizarUI();
+      }
+
+      function actualizarUI() {
+        const pisos = Math.max(0, torre.length - 1);
+        const momento = pisos < 3 ? "Dia" : (pisos < 6 ? "Atardecer" : "Noche");
+        lblTop1.textContent =
+          "Pisos: " + pisos + "/" + PISOS_META +
+          " (" + momento + ") | Pts: " + puntaje +
+          " | Arbol: " + tipoActual.nombre;
+        lblTop2.textContent = "Markov: " + markov.actual.desc + " | " + mensaje;
+
+        // Renderizar botones del árbol de pisos
+        treeButtonsEl.innerHTML = "";
+        for (const op of opcionesArbol) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          const esSeleccionado = (tipoActual === op);
+          btn.textContent = op.nombre + " (+" + op.puntosBase + ")";
+          btn.className = esSeleccionado
+            ? "shrink-0 px-3 py-1.5 rounded-xl text-xs sm:text-sm font-bold bg-cyan-400 text-slate-950 border border-cyan-200 shadow cursor-pointer transition"
+            : "shrink-0 px-3 py-1.5 rounded-xl text-xs sm:text-sm font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer transition";
+          btn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            tipoActual = op;
+            actualizarUI();
+          });
+          treeButtonsEl.appendChild(btn);
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // 5. ACTUALIZACIÓN DE ANIMACIONES (60 FPS escalado a paso lógico de 20ms)
+      // -----------------------------------------------------------------------
+      let lastFrameTime = performance.now();
+      let accumulatorMs = 0;
+      const STEP_MS = 20;
+
+      function actualizarPasoLogico() {
+        if (ticksAvisoClima > 0) {
+          ticksAvisoClima--;
+        }
+
+        // Velocidad de grúa escalada suavemente en pantallas estrechas
+        const velEscalada = markov.actual.vel * Math.max(0.62, Math.min(1.15, scaleFactor));
+
+        if (!gameOver && !victoria) {
+          gruaX += dirGrua * velEscalada;
+          const { minX, maxX } = obtenerLimitesGruaX();
+          if (gruaX <= minX) {
+            gruaX = minX;
+            dirGrua = 1;
+          } else if (gruaX + anchoBloqueActual >= maxX) {
+            gruaX = Math.max(minX, maxX - anchoBloqueActual);
+            dirGrua = -1;
+          }
+        }
+
+        const factorClima =
+          markov.actual === Clima.RAFAGA ? 2.1 :
+          markov.actual === Clima.BRISA ? 1.35 : 0.85;
+
+        const margenLateral = 24;
+        for (const p of personas) {
+          if (!p.inicializadoX) {
+            p.x = margenLateral + p.xRatio * Math.max(60, viewW - margenLateral * 2);
+            p.inicializadoX = true;
+          }
+          if (victoria) {
+            p.paso += 0.24;
+          } else {
+            p.x += p.dir * p.vel * Math.max(0.65, Math.min(1.1, scaleFactor));
+            p.paso += 0.18;
+            if (p.x < margenLateral) {
+              p.x = margenLateral;
+              p.dir = 1;
+            } else if (p.x > viewW - margenLateral) {
+              p.x = viewW - margenLateral;
+              p.dir = -1;
+            }
+          }
+        }
+
+        if (!victoria) {
+          for (let i = 0; i < pajaros.length; i++) {
+            const pj = pajaros[i];
+            pj.x += pj.vx * factorClima * Math.max(0.65, Math.min(1.15, scaleFactor));
+            pj.faseAla += 0.25 * factorClima;
+            if (pj.x > viewW + 40) {
+              pj.x = -40 - Math.random() * 140;
+              pj.yRelativaHueco = 0.2 + Math.random() * 0.6;
+              pj.vx = 1.7 + Math.random() * 1.2;
+            }
+          }
+        }
+
+        for (const lv of viento) {
+          if (!lv.inicializada) {
+            lv.x = lv.xRatio * viewW;
+            lv.y = (0.1 + lv.yRatio * 0.5) * viewH;
+            lv.inicializada = true;
+          }
+          lv.x += lv.vel * (markov.actual === Clima.RAFAGA ? 2.2 : 1.1) * Math.max(0.7, Math.min(1.1, scaleFactor));
+          if (lv.x - lv.largo > viewW + 25) {
+            lv.x = -25;
+            lv.y = 55 + Math.random() * Math.max(140, viewH * 0.45);
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // 6. DIBUJADO EN CANVAS (Cielo, Clima, Grúa, Grafo de Torre, Personas)
+      // -----------------------------------------------------------------------
+      function lerp(a, b, t) {
+        return a + (b - a) * t;
+      }
+
+      function dibujarEscena() {
+        const n = torre.length;
+        const pisos = Math.max(0, n - 1);
+        const desp = obtenerDesplazamientoY();
+        const osc = Math.min(1.0, pisos / PISOS_META);
+
+        // Gradiente progresivo de día a noche
+        const rTop = Math.round(lerp(30, 8, osc));
+        const gTop = Math.round(lerp(95, 12, osc));
+        const bTop = Math.round(lerp(220, 36, osc));
+
+        const rBot = Math.round(lerp(160, 35, osc));
+        const gBot = Math.round(lerp(215, 42, osc));
+        const bBot = Math.round(lerp(245, 85, osc));
+
+        const gradCielo = ctx.createLinearGradient(0, 0, 0, viewH);
+        gradCielo.addColorStop(0, "rgb(" + rTop + "," + gTop + "," + bTop + ")");
+        gradCielo.addColorStop(1, "rgb(" + rBot + "," + gBot + "," + bBot + ")");
+        ctx.fillStyle = gradCielo;
+        ctx.fillRect(0, 0, viewW, viewH);
+
+        // Estrellas al anochecer
+        if (osc > 0.35) {
+          const alfaEstrellas = Math.min(1.0, (osc - 0.35) / 0.65) * 0.9;
+          ctx.fillStyle = "rgba(255, 255, 220, " + alfaEstrellas.toFixed(3) + ")";
+          for (const est of estrellas) {
+            ctx.beginPath();
+            ctx.arc(est.xRatio * viewW, est.yRatio * viewH, 1.8, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        // En CALMA: sol de día o luna tenue al atardecer/noche
+        if (markov.actual === Clima.CALMA) {
+          const astroX = Math.max(54, Math.min(115, viewW * 0.12));
+          const astroY = 56;
+          if (osc < 0.45) {
+            ctx.fillStyle = "rgba(255, 220, 90, 0.88)";
+            ctx.beginPath();
+            ctx.arc(astroX, astroY, 22, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            const alfaLuna = (65 + osc * 75) / 255;
+            ctx.fillStyle = "rgba(235, 240, 255, " + alfaLuna.toFixed(3) + ")";
+            ctx.beginPath();
+            ctx.arc(astroX, astroY, 20, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        // Brisa o ráfagas de viento según estado de Markov
+        if (markov.actual === Clima.BRISA || markov.actual === Clima.RAFAGA) {
+          const raf = (markov.actual === Clima.RAFAGA);
+          ctx.lineCap = "round";
+          ctx.lineWidth = raf ? 2.4 : 1.3;
+          ctx.strokeStyle = raf ? "rgba(255, 255, 255, 0.70)" : "rgba(255, 255, 255, 0.42)";
+          for (const lv of viento) {
+            ctx.beginPath();
+            ctx.moveTo(lv.x - lv.largo, lv.y);
+            ctx.lineTo(lv.x, lv.y);
+            ctx.stroke();
+            if (raf) {
+              ctx.beginPath();
+              ctx.moveTo(lv.x - lv.largo * 0.5, lv.y + 6);
+              ctx.lineTo(lv.x + 8, lv.y + 4);
+              ctx.stroke();
+            }
+          }
+        }
+
+        // Suelo / vereda
+        const sueloBase = obtenerSueloYBase();
+        const ys = Math.floor(sueloBase + desp);
+        if (ys < viewH) {
+          const rSuelo = Math.round(lerp(88, 25, osc));
+          const gSuelo = Math.round(lerp(165, 55, osc));
+          const bSuelo = Math.round(lerp(82, 35, osc));
+          ctx.fillStyle = "rgb(" + rSuelo + "," + gSuelo + "," + bSuelo + ")";
+          ctx.fillRect(0, ys, viewW, viewH - ys);
+
+          ctx.fillStyle = osc > 0.5 ? "rgba(110, 118, 128, 0.7)" : "rgba(180, 185, 190, 0.85)";
+          ctx.fillRect(0, ys, viewW, Math.min(8, viewH - ys));
+        }
+
+        // Grúa de obra a la derecha trabajando cerca de la torre
+        const gx = viewW - Math.min(85, Math.max(46, viewW * 0.11));
+        const gy0 = 55;
+        if (ys > gy0) {
+          ctx.strokeStyle = "#f1c40f";
+          ctx.lineWidth = 2.4;
+          const torreAlto = Math.max(0, ys - gy0);
+          ctx.strokeRect(gx - 9, gy0, 18, torreAlto);
+
+          ctx.lineWidth = 1.4;
+          for (let gy = gy0; gy < ys - 18; gy += 24) {
+            ctx.beginPath();
+            ctx.moveTo(gx - 9, gy);
+            ctx.lineTo(gx + 9, gy + 24);
+            ctx.moveTo(gx + 9, gy);
+            ctx.lineTo(gx - 9, gy + 24);
+            ctx.stroke();
+          }
+
+          const yb = obtenerYBloqueColgando(desp);
+          ctx.lineWidth = 2.4;
+          ctx.beginPath();
+          ctx.moveTo(gx - 22, gy0);
+          ctx.lineTo(gx + 22, gy0);
+          ctx.moveTo(gx, gy0 - 16);
+          ctx.lineTo(gx - 22, gy0);
+          ctx.moveTo(gx, gy0 - 16);
+          ctx.lineTo(gx + 22, gy0);
+          ctx.stroke();
+
+          // Cable desde la grúa hacia el bloque oscilante
+          ctx.strokeStyle = osc > 0.5 ? "#cbd5e1" : "#334155";
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          const cxBloque = gruaX + anchoBloqueActual / 2.0;
+          ctx.moveTo(cxBloque, gy0);
+          ctx.lineTo(cxBloque, yb);
+          ctx.stroke();
+        }
+
+        // Pisos construidos (nodos del grafo con soporte y ventanas iluminadas de noche)
+        for (let i = 0; i < n; i++) {
+          const b = torre[i];
+          const bx = Math.floor(b.x);
+          const by = Math.floor(sueloBase - (i + 1) * ALTO_PISO + desp);
+          const bh = Math.floor(b.alto - 2);
+          const bw = Math.max(8, Math.floor(b.ancho));
+
+          ctx.fillStyle = b.tipo.colorPared;
+          roundRectPath(ctx, bx, by, bw, bh, 6);
+          ctx.fill();
+
+          ctx.strokeStyle = "#334155";
+          ctx.lineWidth = 1.3;
+          roundRectPath(ctx, bx, by, bw, bh, 6);
+          ctx.stroke();
+
+          const luzEncendida = osc > 0.45 && ((i + Math.floor(b.x)) % 2 === 0);
+          ctx.fillStyle = luzEncendida ? "#ffe15a" : b.tipo.colorVentana;
+          for (let wx = bx + 10; wx + 12 < bx + bw - 6; wx += 22) {
+            ctx.fillRect(wx, by + 9, 12, 16);
+          }
+        }
+
+        // Bloque colgando en movimiento
+        if (!gameOver && !victoria && n > 0) {
+          const yb = obtenerYBloqueColgando(desp);
+          const bh = Math.floor(ALTO_PISO - 2);
+          const bw = Math.max(8, Math.floor(anchoBloqueActual));
+
+          ctx.fillStyle = tipoActual.colorPared;
+          roundRectPath(ctx, Math.floor(gruaX), yb, bw, bh, 6);
+          ctx.fill();
+
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 1.5;
+          roundRectPath(ctx, Math.floor(gruaX), yb, bw, bh, 6);
+          ctx.stroke();
+        }
+
+        // Pajaritos cruzando en la zona de caída entre el bloque y la cima de la torre
+        if (!victoria) {
+          const gp = Math.round(lerp(60, 175, osc));
+          ctx.strokeStyle = "rgb(" + gp + "," + gp + "," + gp + ")";
+          ctx.lineWidth = 2.2;
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+
+          for (const pj of pajaros) {
+            const x = Math.floor(pj.x);
+            const y = obtenerYPajaro(pj, desp);
+            const a = Math.sin(pj.faseAla) * 5;
+            ctx.beginPath();
+            ctx.moveTo(x - 7, y - a);
+            ctx.lineTo(x, y);
+            ctx.lineTo(x + 7, y - a);
+            ctx.stroke();
+          }
+        }
+
+        // Personas: caminan en el suelo o suben a los pisos a saltar de alegría al ganar
+        for (const p of personas) {
+          let px;
+          let py;
+          if (victoria && p.pisoAsignado >= 0 && p.pisoAsignado < torre.length) {
+            const b = torre[p.pisoAsignado];
+            const posX = b.x + Math.min(Math.max(4.0, p.offsetRelativo), Math.max(4.0, b.ancho - 4.0));
+            px = Math.floor(posX);
+            const basePisoY = Math.floor(sueloBase - p.pisoAsignado * ALTO_PISO + desp);
+            const salto = Math.floor(Math.abs(Math.sin(p.paso * 1.8)) * 9);
+            py = basePisoY - salto;
+          } else {
+            px = Math.floor(p.x);
+            py = ys;
+          }
+
+          const ps = victoria ? Math.sin(p.paso * 2.2) * 5 : Math.sin(p.paso) * 4;
+          ctx.strokeStyle = osc > 0.5 ? "#cbd5e1" : "#334155";
+          ctx.lineWidth = 2.5;
+          ctx.lineCap = "round";
+
+          // Piernas
+          ctx.beginPath();
+          ctx.moveTo(px, py - 10);
+          ctx.lineTo(px - ps, py);
+          ctx.moveTo(px, py - 10);
+          ctx.lineTo(px + ps, py);
+          ctx.stroke();
+
+          // Brazos levantados celebrando en victoria
+          if (victoria) {
+            const brazoOsc = Math.sin(p.paso * 2.5) * 3;
+            ctx.beginPath();
+            ctx.moveTo(px - 4, py - 19);
+            ctx.lineTo(px - 9, py - 27 + brazoOsc);
+            ctx.moveTo(px + 4, py - 19);
+            ctx.lineTo(px + 9, py - 27 - brazoOsc);
+            ctx.stroke();
+          }
+
+          // Torso y cabeza
+          ctx.fillStyle = p.colorCamisa;
+          ctx.fillRect(px - 4, py - 21, 8, 11);
+
+          ctx.fillStyle = "#f5cba7";
+          ctx.beginPath();
+          ctx.arc(px, py - 25, 4.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Banner de aviso cuando cambia el clima de Markov
+        if (ticksAvisoClima > 0 && avisoClima) {
+          const fontSize = viewW < 480 ? 13 : 16;
+          ctx.font = "700 " + fontSize + "px Inter, sans-serif";
+          const tw = ctx.measureText(avisoClima).width;
+          const bw = Math.min(viewW - 24, tw + 28);
+          const bx = Math.floor((viewW - bw) / 2);
+          const by = 14;
+          const bh = 30;
+
+          ctx.fillStyle = "rgba(20, 28, 38, 0.85)";
+          roundRectPath(ctx, bx, by, bw, bh, 12);
+          ctx.fill();
+
+          ctx.strokeStyle = markov.actual === Clima.RAFAGA ? "#ff7675" : "#81ecec";
+          ctx.lineWidth = 1.5;
+          roundRectPath(ctx, bx, by, bw, bh, 12);
+          ctx.stroke();
+
+          ctx.fillStyle = "#ffffff";
+          ctx.fillText(avisoClima, bx + 14, by + 20);
+        }
+
+        // Pantalla final de victoria o derrota
+        if (victoria) {
+          ctx.fillStyle = "rgba(20, 30, 25, 0.58)";
+          ctx.fillRect(0, 0, viewW, viewH);
+
+          ctx.fillStyle = "#2ecc71";
+          const tituloSize = viewW < 520 ? 18 : 26;
+          ctx.font = "800 " + tituloSize + "px Inter, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("¡HOGAR COMPLETADO! TODOS TIENEN CASA", viewW / 2, Math.max(66, viewH * 0.16));
+
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "600 " + (viewW < 520 ? 13 : 17) + "px Inter, sans-serif";
+          ctx.fillText(
+            PISOS_META + "/" + PISOS_META + " pisos construidos | Puntaje final: " + puntaje,
+            viewW / 2,
+            Math.max(92, viewH * 0.16 + 28)
+          );
+          ctx.textAlign = "left";
+        } else if (gameOver) {
+          ctx.fillStyle = "rgba(15, 23, 42, 0.45)";
+          ctx.fillRect(0, 0, viewW, viewH);
+
+          ctx.fillStyle = "#ff4d4d";
+          const errSize = viewW < 520 ? 17 : 25;
+          ctx.font = "800 " + errSize + "px Inter, sans-serif";
+          ctx.textAlign = "center";
+          const textoDerrota = mensaje.startsWith("¡PERDISTE!")
+            ? "PERDISTE - PAJARITO APLASTADO"
+            : "TORRE COLAPSADA - PISOS: " + pisos;
+          ctx.fillText(textoDerrota, viewW / 2, viewH * 0.46);
+          ctx.textAlign = "left";
+        }
+      }
+
+      function roundRectPath(c, x, y, w, h, r) {
+        const radius = Math.min(r, w / 2, h / 2);
+        c.beginPath();
+        c.moveTo(x + radius, y);
+        c.arcTo(x + w, y, x + w, y + h, radius);
+        c.arcTo(x + w, y + h, x, y + h, radius);
+        c.arcTo(x, y + h, x, y, radius);
+        c.arcTo(x, y, x + w, y, radius);
+        c.closePath();
+      }
+
+      // -----------------------------------------------------------------------
+      // 7. DIMENSIONADO RESPONSIVE DEL CANVAS Y EVENTOS
+      // -----------------------------------------------------------------------
+      function redimensionarCanvas() {
+        const rect = wrapper.getBoundingClientRect();
+        const prevW = viewW || LOGICAL_REF_WIDTH;
+        viewW = Math.max(280, Math.floor(rect.width));
+        viewH = Math.max(240, Math.floor(rect.height));
+        scaleFactor = viewW / LOGICAL_REF_WIDTH;
+
+        const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+        canvas.width = Math.floor(viewW * dpr);
+        canvas.height = Math.floor(viewH * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        if (torre.length > 0) {
+          const ratioX = viewW / prevW;
+          for (const b of torre) {
+            b.x *= ratioX;
+          }
+          gruaX *= ratioX;
+          const { minX, maxX } = obtenerLimitesGruaX();
+          gruaX = Math.max(minX, Math.min(gruaX, Math.max(minX, maxX - anchoBloqueActual)));
+        }
+
+        for (const p of personas) {
+          p.inicializadoX = false;
+        }
+        for (const lv of viento) {
+          lv.inicializada = false;
+        }
+
+        dibujarEscena();
+      }
+
+      function loopAnimacion(now) {
+        const deltaMs = Math.min(100, Math.max(0, now - lastFrameTime));
+        lastFrameTime = now;
+        accumulatorMs += deltaMs;
+
+        while (accumulatorMs >= STEP_MS) {
+          actualizarPasoLogico();
+          accumulatorMs -= STEP_MS;
+        }
+
+        dibujarEscena();
+        requestAnimationFrame(loopAnimacion);
+      }
+
+      // Controles táctiles / mouse en el canvas
+      canvas.addEventListener("pointerdown", (e) => {
+        if (e.button !== undefined && e.button !== 0 && e.pointerType === "mouse") return;
+        soltarBloque();
+      });
+
+      // Control de teclado en escritorio (ESPACIO)
+      window.addEventListener("keydown", (e) => {
+        if (e.code === "Space" || e.key === " ") {
+          e.preventDefault();
+          soltarBloque();
+        } else if (e.key === "r" || e.key === "R") {
+          reiniciarJuego();
+        }
+      });
+
+      btnReset.addEventListener("click", (e) => {
+        e.stopPropagation();
+        reiniciarJuego();
+      });
+
+      window.addEventListener("resize", redimensionarCanvas);
+
+      // Inicio seguro
+      try {
+        inicializarEntidadesEscenario();
+        reiniciarJuego();
+        redimensionarCanvas();
+        requestAnimationFrame(loopAnimacion);
+      } catch (err) {
+        lblTop2.textContent = "Error al iniciar el juego: " + (err && err.message ? err.message : err);
+      }
+    })();
+  </script>
+</body>
+</html>
